@@ -1,19 +1,64 @@
 from __future__ import annotations
 import os
 import argparse
+import unicodedata
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import MultiLabelBinarizer
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, f1_score, make_scorer
 import joblib
 
 # --- configuración por defecto ---
 DATA_PATH = os.getenv("DATA_PATH", "data/dataset_competencias.csv")
 MODEL_PATH = os.getenv("MODEL_PATH", "models/pipeline_competencias.joblib")
+
+SPANISH_STOP_WORDS = [
+    "de", "la", "que", "el", "en", "y", "a", "los", "del", "se", "las", "por", "un", "para", "con",
+    "no", "una", "su", "al", "lo", "como", "más", "pero", "sus", "le", "ya", "o", "porque", "cuando",
+    "muy", "sin", "sobre", "también", "me", "hasta", "hay", "donde", "quien", "desde", "todo", "nos",
+    "durante", "todos", "uno", "les", "ni", "contra", "otros", "ese", "eso", "ante", "ellos", "e", "esto",
+    "mí", "antes", "algunos", "qué", "unos", "yo", "otro", "otras", "otra", "él", "tanto", "esa", "estos",
+    "mucho", "quienes", "nada", "muchos", "cual", "poco", "ella", "estar", "estas", "algunas", "algo",
+    "nosotros", "mi", "mis", "tú", "te", "ti", "tu", "tus", "ellas", "nosotras", "vosotros", "vosotras",
+    "os", "mío", "mía", "míos", "mías", "tuyo", "tuya", "tuyos", "tuyas", "suyo", "suya", "suyos",
+    "suyas", "nuestro", "nuestra", "nuestros", "nuestras", "vuestro", "vuestra", "vuestros", "vuestras",
+    "esos", "esas", "estoy", "estás", "está", "estamos", "estáis", "están", "esté", "estés", "estemos",
+    "estéis", "estén", "estaré", "estarás", "estará", "estaremos", "estaréis", "estarán", "estaría",
+    "estarías", "estaríamos", "estaríais", "estarían", "estaba", "estabas", "estábamos", "estabais",
+    "estaban", "estuve", "estuviste", "estuvo", "estuvimos", "estuvisteis", "estuvieron", "estuviera",
+    "estuvieras", "estuviéramos", "estuvierais", "estuvieran", "estuviese", "estuvieses", "estuviésemos",
+    "estuvieseis", "estuviesen", "estando", "estado", "estada", "estados", "estadas", "estad", "he",
+    "has", "ha", "hemos", "habéis", "han", "haya", "hayas", "hayamos", "hayáis", "hayan", "habré",
+    "habrás", "habrá", "habremos", "habréis", "habrán", "habría", "habrías", "habríamos", "habríais",
+    "habrían", "había", "habías", "habíamos", "habíais", "habían", "hube", "hubiste", "hubo", "hubimos",
+    "hubisteis", "hubieron", "hubiera", "hubieras", "hubiéramos", "hubierais", "hubieran", "hubiese",
+    "hubieses", "hubiésemos", "hubieseis", "hubiesen", "habiendo", "habido", "habida", "habidos",
+    "habidas", "soy", "eres", "es", "somos", "sois", "son", "sea", "seas", "seamos", "seáis", "sean",
+    "seré", "serás", "será", "seremos", "seréis", "serán", "sería", "serías", "seríamos", "seríais",
+    "serían", "era", "eras", "éramos", "erais", "eran", "fui", "fuiste", "fue", "fuimos", "fuisteis",
+    "fueron", "fuera", "fueras", "fuéramos", "fuerais", "fueran", "fuese", "fueses", "fuésemos",
+    "fueseis", "fuesen", "siendo", "sido", "tengo", "tienes", "tiene", "tenemos", "tenéis", "tienen",
+    "tenga", "tengas", "tengamos", "tengáis", "tengan", "tendré", "tendrás", "tendrá", "tendremos",
+    "tendréis", "tendrán", "tendría", "tendrías", "tendríamos", "tendríais", "tendrían", "tenía", "tenías",
+    "teníamos", "teníais", "tenían", "tuve", "tuviste", "tuvo", "tuvimos", "tuvisteis", "tuvieron",
+    "tuviera", "tuvieras", "tuviéramos", "tuvierais", "tuvieran", "tuviese", "tuvieses", "tuviésemos",
+    "tuvieseis", "tuviesen", "teniendo", "tenido", "tenida", "tenidos", "tenidas", "tened",
+]
+
+
+def _normalize_stopwords(words: list[str]) -> list[str]:
+    normalized = set()
+    for w in words:
+        normalized.add(w)
+        normalized.add(
+            unicodedata.normalize("NFKD", w).encode("ascii", "ignore").decode("ascii")
+        )
+    normalized.discard("")
+    return sorted(normalized)
 
 def load_dataset(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
@@ -36,6 +81,57 @@ def build_text(row) -> str:
     taller_tokens = " ".join([f"topic:{t}" for t in talleres])
     return f"{cv} {taller_tokens}"
 
+def _build_pipeline() -> Pipeline:
+    """Crea el pipeline base con TF-IDF y OneVsRest(LogisticRegression)."""
+    logistic = LogisticRegression(
+        max_iter=1000,
+        class_weight="balanced",
+        solver="liblinear",
+    )
+    stop_words = _normalize_stopwords(SPANISH_STOP_WORDS)
+    return Pipeline([
+        ("tfidf", TfidfVectorizer(
+            lowercase=True,
+            ngram_range=(1, 2),
+            min_df=1,
+            max_df=0.95,
+            strip_accents="unicode",
+            sublinear_tf=True,
+            stop_words=stop_words,
+        )),
+        ("clf", OneVsRestClassifier(logistic, n_jobs=-1)),
+    ])
+
+
+def _run_hyperparameter_search(pipeline: Pipeline, X_train, y_train):
+    """
+    Realiza una búsqueda de hiperparámetros sencilla para refinar el modelo.
+
+    Esto ayuda a que el modelo resultante generalice mejor, sobre todo cuando
+    se agreguen nuevos datos al dataset.
+    """
+    scorer = make_scorer(f1_score, average="macro")
+    param_grid = {
+        "tfidf__ngram_range": [(1, 2), (1, 3)],
+        "tfidf__min_df": [1, 2],
+        "clf__estimator__C": [0.5, 1.0, 2.0],
+    }
+
+    search = GridSearchCV(
+        pipeline,
+        param_grid=param_grid,
+        scoring=scorer,
+        cv=3,
+        n_jobs=os.cpu_count() or 1,
+        verbose=2,
+    )
+
+    print("[train] buscando mejores hiperparámetros (GridSearchCV)...")
+    search.fit(X_train, y_train)
+    print(f"[train] mejores hiperparámetros: {search.best_params_}")
+    return search.best_estimator_, search.best_params_
+
+
 def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: int = 42):
     print(f"[train] leyendo dataset: {data_path}")
     df = load_dataset(data_path)
@@ -51,22 +147,8 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
     # Split
     X_train, X_test, y_train, y_test = train_test_split(X_text, Y, test_size=test_size, random_state=random_state)
 
-    # Pipeline TF-IDF + OneVsRest(LogReg)
-    pipeline = Pipeline([
-        ("tfidf", TfidfVectorizer(
-            lowercase=True,
-            ngram_range=(1,2),
-            min_df=1,
-            max_df=0.95
-        )),
-        ("clf", OneVsRestClassifier(
-  LogisticRegression(max_iter=300, class_weight="balanced")
-)
-)
-    ])
-
-    print("[train] entrenando modelo...")
-    pipeline.fit(X_train, y_train)
+    pipeline = _build_pipeline()
+    pipeline, best_params = _run_hyperparameter_search(pipeline, X_train, y_train)
 
     print("[train] evaluación...")
     y_pred = pipeline.predict(X_test)
@@ -75,7 +157,15 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
 
     # Guardar pipeline + clases (etiquetas)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
-    artifact = {"pipeline": pipeline, "classes": target_names}
+    artifact = {
+        "pipeline": pipeline,
+        "classes": target_names,
+        "mlb": mlb,
+        "metadata": {
+            "best_params": best_params,
+            "threshold": os.getenv("ML_THRESHOLD", "0.35"),
+        },
+    }
     joblib.dump(artifact, model_path)
     print(f"[train] modelo guardado en: {model_path}")
     print("[train] listo ✅")
