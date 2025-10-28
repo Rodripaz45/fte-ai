@@ -24,3 +24,7 @@ Thumbs.db
 
 # Cache de dependencias
 pip-wheel-metadata/
+
+# Model artifacts
+models/
+*.joblib

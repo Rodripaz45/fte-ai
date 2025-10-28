@@ -9,4 +9,5 @@ def load_model(model_path: str = DEFAULT_MODEL_PATH):
     artifact = joblib.load(model_path)
     pipeline = artifact["pipeline"]
     classes = artifact["classes"]
-    return pipeline, list(classes)
+    thresholds = dict(artifact.get("thresholds", {}))
+    return pipeline, list(classes), thresholds

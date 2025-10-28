@@ -92,7 +92,7 @@ def _build_text_for_model(cv_text: str | None, talleres: List[Dict[str, Any]] | 
     return (cv + taller_tokens).strip()
 
 def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None) -> List[Dict[str, Any]]:
-    pipeline, classes = load_model()  # levanta de models/pipeline_competencias.joblib
+    pipeline, classes, thresholds = load_model()  # levanta de models/pipeline_competencias.joblib
     text = _build_text_for_model(cv_text, talleres)
     proba = None
     try:
@@ -102,12 +102,22 @@ def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None)
         import numpy as np
         logits = pipeline.decision_function([text])[0]
         proba = 1 / (1 + np.exp(-logits))
-    # umbral simple
-    threshold = float(os.getenv("ML_THRESHOLD", "0.35"))
+    # Umbral por clase (fallback al valor global)
+    default_threshold = float(os.getenv("ML_THRESHOLD", "0.35"))
+    thresholds = thresholds or {}
     results = []
     for cls, p in zip(classes, proba):
-        if p >= threshold:
-            results.append({"competencia": cls, "nivel": round(p * 100.0, 1), "confianza": 0.9, "fuente": ["ml"]})
+        cls_threshold = thresholds.get(cls, default_threshold)
+        if p >= cls_threshold:
+            results.append(
+                {
+                    "competencia": cls,
+                    "nivel": round(p * 100.0, 1),
+                    "confianza": 0.9,
+                    "fuente": ["ml"],
+                    "umbral": round(cls_threshold, 3),
+                }
+            )
     # ordenar por nivel
     results.sort(key=lambda x: -x["nivel"])
     return results
@@ -125,7 +135,11 @@ def analyze_participant_profile(payload) -> Dict[str, Any]:
         return {
             "participanteId": payload.participanteId,
             "competencias": compet_ml,
-            "meta": {"mode": "ml", "threshold": os.getenv("ML_THRESHOLD", "0.35")}
+            "meta": {
+                "mode": "ml",
+                "threshold": os.getenv("ML_THRESHOLD", "0.35"),
+                "threshold_strategy": "per_class",
+            },
         }
 
     # Fallback: reglas + fusión
