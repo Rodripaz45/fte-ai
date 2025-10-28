@@ -1,0 +1,26 @@
+# Entorno virtual
+.venv/
+venv/
+
+# Archivos temporales y compilados
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+
+# Configuración local
+.env
+.env.*
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Cache de dependencias
+pip-wheel-metadata/

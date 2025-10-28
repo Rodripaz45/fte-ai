@@ -1,0 +1,22 @@
+{
+  "participanteId": "P001-2024",
+  "incluirCV": true,
+  "incluirTalleres": true,
+  "useML": true,
+  "talleres": [
+    {
+      "tema": "Excel",
+      "asistencia_pct": 0.85
+    },
+    {
+      "tema": "python",
+      "asistencia_pct": 0.70
+    },
+    {
+      "tema": "Comunicación",
+      "asistencia_pct": 0.90
+    }
+  ],
+  "cvTexto": "Experiencia en análisis de datos con Python, SQL y Excel. Desarrollo de scripts para automatización de procesos. Conocimientos en Power BI para dashboards y reportes ejecutivos. Buena comunicación verbal y escrita. Liderazgo de equipos pequeños."
+}
+
