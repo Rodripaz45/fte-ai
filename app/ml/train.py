@@ -9,7 +9,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import classification_report, f1_score, make_scorer
+from sklearn.metrics import classification_report, f1_score, fbeta_score, make_scorer
 import joblib
 import numpy as np
 
@@ -115,7 +115,7 @@ def _run_hyperparameter_search(pipeline: Pipeline, X_train, y_train):
     param_grid = {
         "tfidf__ngram_range": [(1, 2), (1, 3)],
         "tfidf__min_df": [1, 2],
-        "clf__estimator__C": [0.5, 1.0, 2.0],
+        "clf__estimator__C": [0.25, 0.5, 1.0, 1.5, 2.0, 2.5],
     }
 
     search = GridSearchCV(
@@ -133,24 +133,28 @@ def _run_hyperparameter_search(pipeline: Pipeline, X_train, y_train):
     return search.best_estimator_, search.best_params_
 
 
-def _select_best_threshold(pipeline: Pipeline, X_valid, y_valid, thresholds=None):
+def _select_best_threshold(pipeline: Pipeline, X_valid, y_valid, thresholds=None, beta: float = 2.0, max_threshold: float = 0.40):
     if thresholds is None:
-        thresholds = [round(t, 2) for t in np.linspace(0.2, 0.6, 21)]
+        # Rango más amplio y granular para evitar ser demasiado estricto
+        thresholds = [round(t, 2) for t in np.linspace(0.15, 0.6, 46)]
     # Obtener probabilidades/logits
     try:
         proba = pipeline.predict_proba(X_valid)
     except Exception:
         logits = pipeline.decision_function(X_valid)
         proba = 1 / (1 + np.exp(-logits))
-    best_t = 0.35
-    best_f1 = -1.0
+    best_t = 0.30
+    best_f2 = -1.0
     for t in thresholds:
+        # Limitar búsqueda para evitar umbrales excesivos en datasets pequeños
+        if t > max_threshold:
+            continue
         y_pred = (proba >= t).astype(int)
-        f1 = f1_score(y_valid, y_pred, average="macro", zero_division=0)
-        if f1 > best_f1:
-            best_f1 = f1
+        f2 = fbeta_score(y_valid, y_pred, beta=beta, average="macro", zero_division=0)
+        if f2 > best_f2:
+            best_f2 = f2
             best_t = float(t)
-    return best_t, best_f1
+    return best_t, best_f2
 
 
 def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: int = 42):
@@ -171,8 +175,8 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
     pipeline = _build_pipeline()
     pipeline, best_params = _run_hyperparameter_search(pipeline, X_train, y_train)
 
-    print("[train] seleccionando umbral óptimo (macro-F1)...")
-    best_threshold, best_f1 = _select_best_threshold(pipeline, X_test, y_test)
+    print("[train] seleccionando umbral óptimo (macro-F2, favorece recall)...")
+    best_threshold, best_f2 = _select_best_threshold(pipeline, X_test, y_test)
 
     print("[train] evaluación...")
     # Predicción binaria usando umbral óptimo
@@ -187,6 +191,9 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
 
     # Guardar pipeline + clases (etiquetas)
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
+    # Cardinalidad de etiquetas (promedio de etiquetas por muestra) para referencia en servicio
+    label_cardinality = float(np.mean(y_train.sum(axis=1)))
+
     artifact = {
         "pipeline": pipeline,
         "classes": target_names,
@@ -194,12 +201,13 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
         "metadata": {
             "best_params": best_params,
             "best_threshold": best_threshold,
-            "cv_macro_f1": float(best_f1),
+            "cv_macro_f2": float(best_f2),
+            "label_cardinality": label_cardinality,
         },
     }
     joblib.dump(artifact, model_path)
     print(f"[train] modelo guardado en: {model_path}")
-    print("[train] listo ✅")
+    print("[train] listo OK")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

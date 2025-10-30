@@ -1,14 +1,9 @@
 from __future__ import annotations
 import os
 from typing import List, Dict, Any, Tuple
-import joblib
+from app.ml.model_loader import load_model
 
-ML_THRESHOLD = float(os.getenv("ML_THRESHOLD", "0.35"))
-
-# Carga perezosa del pipeline entrenado
-_PIPELINE = None
-_PIPELINE_CLASSES = None
-_PIPELINE_PATH = os.getenv("ML_MODEL_PATH", "models/pipeline_competencias.joblib")
+ML_THRESHOLD_ENV = os.getenv("ML_THRESHOLD")
 
 # Diccionario fallback de keywords → competencia (enfocado en PyMEs)
 KEYWORDS_MAP = {
@@ -64,74 +59,56 @@ KEYWORDS_MAP = {
     "cronograma": "Gestion de Proyectos",
 }
 
-def _load_pipeline():
-    global _PIPELINE, _PIPELINE_CLASSES
-    if _PIPELINE is None and os.path.exists(_PIPELINE_PATH):
-        loaded = joblib.load(_PIPELINE_PATH)
-        # Si se carga un diccionario, extraer el pipeline y las clases
-        if isinstance(loaded, dict):
-            # Buscar el objeto que tenga el método predict_proba
-            for key, value in loaded.items():
-                if hasattr(value, 'predict_proba'):
-                    _PIPELINE = value
-                    # Intentar obtener las clases
-                    if 'classes' in loaded:
-                        _PIPELINE_CLASSES = loaded['classes']
-                    elif hasattr(_PIPELINE, 'classes_'):
-                        _PIPELINE_CLASSES = _PIPELINE.classes_
-                    break
-            else:
-                # Si no se encuentra, usar el primer elemento que sea un pipeline
-                _PIPELINE = loaded.get('pipeline') or loaded.get('model') or loaded.get('pipe')
-                _PIPELINE_CLASSES = loaded.get('classes')
-        else:
-            _PIPELINE = loaded
-            if hasattr(loaded, 'classes_'):
-                _PIPELINE_CLASSES = loaded.classes_
-    return _PIPELINE
+def _get_threshold(metadata: Dict[str, Any]) -> float:
+    if ML_THRESHOLD_ENV is not None:
+        try:
+            return float(ML_THRESHOLD_ENV)
+        except ValueError:
+            pass
+    return float(metadata.get("best_threshold", metadata.get("threshold", 0.35)))
 
 def _predict_ml(texto: str, top_k: int) -> List[Dict[str, Any]]:
-    pipe = _load_pipeline()
+    pipe, classes, metadata = load_model()
     if pipe is None:
         return []
-    
-    # Validar que el pipeline tenga los métodos necesarios
-    if not hasattr(pipe, 'predict_proba'):
-        return []
-    
+    text = (texto or "").strip().lower()
     try:
-        # El pipeline es OneVsRest(LogReg) sobre TfidfVectorizer
-        # Obtenemos probabilidades por clase
-        probs = pipe.predict_proba([texto])[0]
-        
-        # Obtener las clases del diccionario cargado
-        global _PIPELINE_CLASSES
-        if _PIPELINE_CLASSES is not None:
-            labels: List[str] = list(_PIPELINE_CLASSES)
-        elif hasattr(pipe, 'classes_'):
-            labels = list(pipe.classes_)
-        elif hasattr(pipe, 'estimator') and hasattr(pipe.estimator, 'classes_'):
-            labels = list(pipe.estimator.classes_)
-        else:
-            # Si no hay clases definidas, usar índices
-            labels = [f"Clase_{i}" for i in range(len(probs))]
-        
-        scored: List[Tuple[str, float]] = []
-        for label, p in zip(labels, probs):
-            if p >= ML_THRESHOLD:
-                scored.append((label, float(p)))
-        # Ordenar de mayor a menor y recortar
-        scored.sort(key=lambda x: x[1], reverse=True)
-        if top_k and top_k > 0:
-            scored = scored[:top_k]
+        probs = pipe.predict_proba([text])[0]
+    except Exception:
+        import numpy as np
+        logits = pipe.decision_function([text])[0]
+        probs = 1 / (1 + np.exp(-logits))
+    threshold = _get_threshold(metadata)
+    min_prob_floor = float(os.getenv("ML_MIN_PROB_FLOOR", "0.25"))
 
-        return [
-            {"nombre": label, "nivel": round(score, 4), "fuente": ["ml"]}
-            for label, score in scored
+    # 1) Por encima del umbral
+    scored: List[Tuple[str, float]] = [
+        (label, float(p))
+        for label, p in zip(classes if classes else [f"Clase_{i}" for i in range(len(probs))], probs)
+        if float(p) >= threshold
+    ]
+    scored.sort(key=lambda x: x[1], reverse=True)
+
+    # 2) Si faltan hasta top_k, completar con los mejores restantes sobre el piso
+    if top_k and top_k > 0 and len(scored) < top_k:
+        chosen = {l for l, _ in scored}
+        remaining = [
+            (label, float(p))
+            for label, p in zip(classes if classes else [f"Clase_{i}" for i in range(len(probs))], probs)
+            if label not in chosen
         ]
-    except Exception as e:
-        # Si hay algún error, devolver lista vacía para usar el fallback
-        return []
+        remaining.sort(key=lambda x: x[1], reverse=True)
+        for label, p in remaining:
+            if p < min_prob_floor:
+                break
+            scored.append((label, p))
+            if len(scored) >= top_k:
+                break
+
+    return [
+        {"competencia": label, "nivel": round(score * 100.0, 1), "confianza": (0.9 if score >= threshold else 0.75), "fuente": ["ml"]}
+        for label, score in scored
+    ]
 
 def _predict_keywords(texto: str, top_k: int) -> List[Dict[str, Any]]:
     t = " " + texto.lower() + " "
@@ -139,9 +116,8 @@ def _predict_keywords(texto: str, top_k: int) -> List[Dict[str, Any]]:
     for kw, comp in KEYWORDS_MAP.items():
         if f" {kw} " in t:
             counts[comp] = counts.get(comp, 0.0) + 1.0
-    # Normalizamos rudimente (0.35–0.75 para que sea comparable a threshold)
     results = [
-        {"nombre": comp, "nivel": min(0.75, 0.35 + c * 0.2), "fuente": ["keywords"]}
+        {"competencia": comp, "nivel": round(min(0.75, 0.35 + c * 0.2) * 100.0, 1), "confianza": 0.6, "fuente": ["keywords"]}
         for comp, c in counts.items()
     ]
     results.sort(key=lambda x: x["nivel"], reverse=True)
@@ -157,18 +133,16 @@ def analyze_job_requirements(puesto_texto: str, top_k: int = 6) -> Dict[str, Any
             "competencias": kw_results,
             "meta": {
                 "mode": "keywords" if kw_results else "none",
-                "threshold": str(ML_THRESHOLD),
             },
         }
     # 3) Si hay ML, enriquecemos con keywords no duplicadas
     kw_results = _predict_keywords(puesto_texto, top_k)
-    names_ml = {c["nombre"] for c in ml_results}
-    merged = ml_results + [c for c in kw_results if c["nombre"] not in names_ml]
-    # recortar a top_k si hace falta
+    names_ml = {c["competencia"] for c in ml_results}
+    merged = ml_results + [c for c in kw_results if c["competencia"] not in names_ml]
     merged.sort(key=lambda x: x["nivel"], reverse=True)
     if top_k and top_k > 0:
         merged = merged[:top_k]
     return {
         "competencias": merged,
-        "meta": {"mode": "ml+keywords", "threshold": str(ML_THRESHOLD)},
+        "meta": {"mode": "ml+keywords"},
     }
