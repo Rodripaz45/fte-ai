@@ -10,11 +10,8 @@ class TallerLite(BaseModel):
 
 class AnalyzeInput(BaseModel):
     participanteId: str
-    incluirCV: bool = True
-    incluirTalleres: bool = True
     talleres: list[TallerLite] | None = None
     cvTexto: str | None = None
-    useML: bool = False  # <--- NUEVO
 
 @router.post("/profile")
 def analyze_profile(payload: AnalyzeInput):

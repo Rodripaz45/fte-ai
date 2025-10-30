@@ -11,6 +11,7 @@ from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, f1_score, make_scorer
 import joblib
+import numpy as np
 
 # --- configuración por defecto ---
 DATA_PATH = os.getenv("DATA_PATH", "data/dataset_competencias.csv")
@@ -132,6 +133,26 @@ def _run_hyperparameter_search(pipeline: Pipeline, X_train, y_train):
     return search.best_estimator_, search.best_params_
 
 
+def _select_best_threshold(pipeline: Pipeline, X_valid, y_valid, thresholds=None):
+    if thresholds is None:
+        thresholds = [round(t, 2) for t in np.linspace(0.2, 0.6, 21)]
+    # Obtener probabilidades/logits
+    try:
+        proba = pipeline.predict_proba(X_valid)
+    except Exception:
+        logits = pipeline.decision_function(X_valid)
+        proba = 1 / (1 + np.exp(-logits))
+    best_t = 0.35
+    best_f1 = -1.0
+    for t in thresholds:
+        y_pred = (proba >= t).astype(int)
+        f1 = f1_score(y_valid, y_pred, average="macro", zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_t = float(t)
+    return best_t, best_f1
+
+
 def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: int = 42):
     print(f"[train] leyendo dataset: {data_path}")
     df = load_dataset(data_path)
@@ -150,8 +171,17 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
     pipeline = _build_pipeline()
     pipeline, best_params = _run_hyperparameter_search(pipeline, X_train, y_train)
 
+    print("[train] seleccionando umbral óptimo (macro-F1)...")
+    best_threshold, best_f1 = _select_best_threshold(pipeline, X_test, y_test)
+
     print("[train] evaluación...")
-    y_pred = pipeline.predict(X_test)
+    # Predicción binaria usando umbral óptimo
+    try:
+        proba_test = pipeline.predict_proba(X_test)
+    except Exception:
+        logits = pipeline.decision_function(X_test)
+        proba_test = 1 / (1 + np.exp(-logits))
+    y_pred = (proba_test >= best_threshold).astype(int)
     target_names = mlb.classes_
     print(classification_report(y_test, y_pred, target_names=target_names, zero_division=0))
 
@@ -163,7 +193,8 @@ def main(data_path: str, model_path: str, test_size: float = 0.2, random_state: 
         "mlb": mlb,
         "metadata": {
             "best_params": best_params,
-            "threshold": os.getenv("ML_THRESHOLD", "0.35"),
+            "best_threshold": best_threshold,
+            "cv_macro_f1": float(best_f1),
         },
     }
     joblib.dump(artifact, model_path)

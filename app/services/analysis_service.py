@@ -92,7 +92,7 @@ def _build_text_for_model(cv_text: str | None, talleres: List[Dict[str, Any]] | 
     return (cv + taller_tokens).strip()
 
 def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None) -> List[Dict[str, Any]]:
-    pipeline, classes = load_model()  # levanta de models/pipeline_competencias.joblib
+    pipeline, classes, metadata = load_model()  # levanta de models/pipeline_competencias.joblib
     text = _build_text_for_model(cv_text, talleres)
     proba = None
     try:
@@ -103,7 +103,7 @@ def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None)
         logits = pipeline.decision_function([text])[0]
         proba = 1 / (1 + np.exp(-logits))
     # umbral simple
-    threshold = float(os.getenv("ML_THRESHOLD", "0.35"))
+    threshold = float(os.getenv("ML_THRESHOLD", metadata.get("best_threshold", metadata.get("threshold", "0.35"))))
     results = []
     for cls, p in zip(classes, proba):
         if p >= threshold:
@@ -113,19 +113,18 @@ def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None)
     return results
 
 def analyze_participant_profile(payload) -> Dict[str, Any]:
-    use_ml = bool(getattr(payload, "useML", False))
     talleres = None
-    if getattr(payload, "incluirTalleres", True) and getattr(payload, "talleres", None):
+    if getattr(payload, "talleres", None):
         talleres = [t.model_dump() if hasattr(t, "model_dump") else t for t in payload.talleres]
     cv_text = getattr(payload, "cvTexto", None)
 
-    if use_ml:
-        # ML directo (predice competencias)
-        compet_ml = _predict_with_ml(cv_text, talleres)
+    # Siempre usar ML si el modelo está disponible; si no, caer a reglas
+    compet_ml = _predict_with_ml(cv_text, talleres)
+    if compet_ml:
         return {
             "participanteId": payload.participanteId,
             "competencias": compet_ml,
-            "meta": {"mode": "ml", "threshold": os.getenv("ML_THRESHOLD", "0.35")}
+            "meta": {"mode": "ml"}
         }
 
     # Fallback: reglas + fusión
