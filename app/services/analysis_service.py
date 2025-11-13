@@ -3,6 +3,7 @@ from collections import defaultdict
 from math import log
 from typing import Any, Dict, List, Tuple
 import os
+import re
 
 # ====== Reglas de fallback alineadas con el dataset ======
 # Nota: estos mapas solo se usan cuando el modelo ML no está disponible.
@@ -75,6 +76,50 @@ COMPETENCIA_SYNONYMS: Dict[str, List[str]] = {
 W_TALLERES = 0.6
 W_CV = 0.4
 
+def _clean_personal_info(text: str) -> str:
+    """
+    Elimina información personal del texto del CV para mejorar la clasificación.
+    Remueve: teléfonos, correos, nombres propios, direcciones, lugares específicos, etc.
+    """
+    if not text:
+        return ""
+    
+    # Patrones a eliminar o reemplazar
+    patterns = [
+        # Teléfonos y celulares
+        (r'\b\d{7,15}\b', ' '),
+        (r'\bcelular\s*:?\s*\d+', ' '),
+        (r'\btel[ée]fono\s*:?\s*\d+', ' '),
+        (r'\bm[óo]vil\s*:?\s*\d+', ' '),
+        # Correos electrónicos
+        (r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', ' '),
+        (r'\bcorreo\s*electr[óo]nico\s*:?\s*[^\s]+', ' '),
+        (r'\bemail\s*:?\s*[^\s]+', ' '),
+        # Nombres y apellidos
+        (r'\bnombre\s*y\s*apellidos?\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*', ' '),
+        (r'\bnombre\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+', ' '),
+        # Lugares y direcciones
+        (r'\blugar\s*de\s*nacimiento\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s]+', ' '),
+        (r'\bnacionalidad\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s]+', ' '),
+        (r'\bdomicilio\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s\d,.-]+', ' '),
+        (r'\bdirecci[óo]n\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s\d,.-]+', ' '),
+        # Etiquetas de datos personales
+        (r'\bcelular\s*:?\s*', ' '),
+        (r'\bcorreo\s*electr[óo]nico\s*:?\s*', ' '),
+        (r'\bnombre\s*y\s*apellidos?\s*:?\s*', ' '),
+        (r'\blugar\s*de\s*nacimiento\s*:?\s*', ' '),
+        (r'\bnacionalidad\s*:?\s*', ' '),
+        (r'\bdomicilio\s*:?\s*', ' '),
+        # Múltiples espacios
+        (r'\s+', ' '),
+    ]
+    
+    cleaned = text
+    for pattern, replacement in patterns:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    
+    return cleaned.strip()
+
 def _normalize_text(s: str) -> str:
     return s.strip().lower()
 
@@ -137,7 +182,10 @@ def _fuse_scores(scores_talleres: Dict[str, float], scores_cv: Dict[str, float])
 from app.ml.model_loader import load_model
 
 def _build_text_for_model(cv_text: str | None, talleres: List[Dict[str, Any]] | None) -> str:
-    cv = (cv_text or "").strip().lower()
+    cv = (cv_text or "").strip()
+    # Limpiar información personal antes de procesar
+    cv = _clean_personal_info(cv)
+    cv = cv.lower()
     taller_tokens = ""
     if talleres:
         topics = [t.get("tema", "").strip().lower() for t in talleres if t.get("tema")]
@@ -155,20 +203,20 @@ def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None)
         import numpy as np
         logits = pipeline.decision_function([text])[0]
         proba = 1 / (1 + np.exp(-logits))
-    # umbral simple
-    threshold = float(os.getenv("ML_THRESHOLD", metadata.get("best_threshold", metadata.get("threshold", "0.35"))))
+    # umbral simple - menos estricto para detectar más competencias
+    threshold = float(os.getenv("ML_THRESHOLD", metadata.get("best_threshold", metadata.get("threshold", "0.20"))))
 
     # resultados por encima del umbral
     above = [
-        {"competencia": cls, "nivel": round(float(p) * 100.0, 1), "confianza": 0.9, "fuente": ["ml"]}
+        {"competencia": cls, "nivel": round(float(p) * 100.0, 1), "confianza": 0.85, "fuente": ["ml"]}
         for cls, p in zip(classes, proba)
         if float(p) >= threshold
     ]
     above.sort(key=lambda x: -x["nivel"])
 
     # Fallback: si hay muy pocos por encima del umbral, completar con los mejores siguientes
-    min_results = int(os.getenv("ML_MIN_RESULTS", "3"))
-    min_prob_floor = float(os.getenv("ML_MIN_PROB_FLOOR", "0.25"))
+    min_results = int(os.getenv("ML_MIN_RESULTS", "5"))
+    min_prob_floor = float(os.getenv("ML_MIN_PROB_FLOOR", "0.15"))
     if len(above) >= min_results:
         return above
 
@@ -181,7 +229,7 @@ def _predict_with_ml(cv_text: str | None, talleres: List[Dict[str, Any]] | None)
     for cls, p in remaining:
         if p < min_prob_floor:
             break
-        above.append({"competencia": cls, "nivel": round(p * 100.0, 1), "confianza": 0.75, "fuente": ["ml"]})
+        above.append({"competencia": cls, "nivel": round(p * 100.0, 1), "confianza": 0.70, "fuente": ["ml"]})
         if len(above) >= min_results:
             break
     return above

@@ -65,7 +65,7 @@ def _get_threshold(metadata: Dict[str, Any]) -> float:
             return float(ML_THRESHOLD_ENV)
         except ValueError:
             pass
-    return float(metadata.get("best_threshold", metadata.get("threshold", 0.35)))
+    return float(metadata.get("best_threshold", metadata.get("threshold", 0.20)))
 
 def _predict_ml(texto: str, top_k: int) -> List[Dict[str, Any]]:
     pipe, classes, metadata = load_model()
@@ -79,7 +79,7 @@ def _predict_ml(texto: str, top_k: int) -> List[Dict[str, Any]]:
         logits = pipe.decision_function([text])[0]
         probs = 1 / (1 + np.exp(-logits))
     threshold = _get_threshold(metadata)
-    min_prob_floor = float(os.getenv("ML_MIN_PROB_FLOOR", "0.25"))
+    min_prob_floor = float(os.getenv("ML_MIN_PROB_FLOOR", "0.15"))
 
     # 1) Por encima del umbral
     scored: List[Tuple[str, float]] = [
@@ -106,7 +106,7 @@ def _predict_ml(texto: str, top_k: int) -> List[Dict[str, Any]]:
                 break
 
     return [
-        {"competencia": label, "nivel": round(score * 100.0, 1), "confianza": (0.9 if score >= threshold else 0.75), "fuente": ["ml"]}
+        {"competencia": label, "nivel": round(score * 100.0, 1), "confianza": (0.85 if score >= threshold else 0.70), "fuente": ["ml"]}
         for label, score in scored
     ]
 

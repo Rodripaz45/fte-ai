@@ -12,6 +12,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, f1_score, fbeta_score, make_scorer
 import joblib
 import numpy as np
+import re
 
 # --- configuración por defecto ---
 DATA_PATH = os.getenv("DATA_PATH", "data/dataset_competencias.csv")
@@ -61,6 +62,55 @@ def _normalize_stopwords(words: list[str]) -> list[str]:
     normalized.discard("")
     return sorted(normalized)
 
+def clean_personal_info(text: str) -> str:
+    """
+    Elimina información personal del texto del CV para mejorar la clasificación.
+    Remueve: teléfonos, correos, nombres propios, direcciones, lugares específicos, etc.
+    """
+    if not text:
+        return ""
+    
+    # Patrones a eliminar o reemplazar
+    patterns = [
+        # Teléfonos y celulares (números con 7-15 dígitos, posibles espacios/guiones)
+        (r'\b\d{7,15}\b', ' '),
+        (r'\bcelular\s*:?\s*\d+', ' '),
+        (r'\btel[ée]fono\s*:?\s*\d+', ' '),
+        (r'\bm[óo]vil\s*:?\s*\d+', ' '),
+        
+        # Correos electrónicos
+        (r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b', ' '),
+        (r'\bcorreo\s*electr[óo]nico\s*:?\s*[^\s]+', ' '),
+        (r'\bemail\s*:?\s*[^\s]+', ' '),
+        
+        # Nombres y apellidos (patrones comunes)
+        (r'\bnombre\s*y\s*apellidos?\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)*', ' '),
+        (r'\bnombre\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)+', ' '),
+        
+        # Lugares y direcciones
+        (r'\blugar\s*de\s*nacimiento\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s]+', ' '),
+        (r'\bnacionalidad\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s]+', ' '),
+        (r'\bdomicilio\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s\d,.-]+', ' '),
+        (r'\bdirecci[óo]n\s*:?\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ\s\d,.-]+', ' '),
+        
+        # Etiquetas de datos personales (sin el valor)
+        (r'\bcelular\s*:?\s*', ' '),
+        (r'\bcorreo\s*electr[óo]nico\s*:?\s*', ' '),
+        (r'\bnombre\s*y\s*apellidos?\s*:?\s*', ' '),
+        (r'\blugar\s*de\s*nacimiento\s*:?\s*', ' '),
+        (r'\bnacionalidad\s*:?\s*', ' '),
+        (r'\bdomicilio\s*:?\s*', ' '),
+        
+        # Múltiples espacios
+        (r'\s+', ' '),
+    ]
+    
+    cleaned = text
+    for pattern, replacement in patterns:
+        cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    
+    return cleaned.strip()
+
 def load_dataset(path: str) -> pd.DataFrame:
     df = pd.read_csv(path)
     # Normaliza columnas
@@ -76,8 +126,12 @@ def build_text(row) -> str:
     """
     Concatenamos CV + talleres (como tokens) para mejorar señal.
     Ej: '...texto del cv...' + ' topic:python topic:sql '
+    Limpia información personal antes de procesar.
     """
-    cv = row["cv_texto"].strip().lower()
+    cv = row["cv_texto"].strip()
+    # Limpiar información personal
+    cv = clean_personal_info(cv)
+    cv = cv.lower()
     talleres = [t.strip().lower() for t in row["talleres"].split(",") if t.strip()]
     taller_tokens = " ".join([f"topic:{t}" for t in talleres])
     return f"{cv} {taller_tokens}"
